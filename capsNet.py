@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers
@@ -8,35 +9,49 @@ from capsUtils import combineIMG
 from capsUtils import plotLog
 from PIL import Image, ImageOps
 from capsLayers import CapsuleLayer, PrimaryCap, Length, Mask
-from sklearn.model_selection import  train_test_split
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.preprocessing.image import load_img
 from os import listdir
 from os.path import isfile, join
 from numpy import asarray
+import argparse
+import os
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras import callbacks
 K.set_image_data_format('channels_last')
-from sklearn.metrics import plot_confusion_matrix, ConfusionMatrixDisplay, confusion_matrix
-
+# from sklearn.metrics import plot_confusion_matrix, ConfusionMatrixDisplay, confusion_matrix
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+import matplotlib.pyplot as plt
 from tensorflow.compat.v1 import ConfigProto
 from tensorflow.compat.v1 import InteractiveSession
 
 from imblearn.over_sampling import SMOTE
 
+# It defines a function fix_gpu() which sets the GPU configuration to allow growth and starts an interactive session
+
+start_time = time.time()
+
+
 def fix_gpu():
     config = ConfigProto()
     config.gpu_options.allow_growth = True
     session = InteractiveSession(config=config)
+
+
 fix_gpu()
 
-#Image Directory Location
-pathImg='images'
+# Image Directory Location
+pathImg = 'images'
 
-#Image Size
+# Image Size
 image_size = 25
 
-#Split Ratio
-test_ratio=0.2
+# Split Ratio
+test_ratio = 0.25
+val_ratio = 0.05
 
-#CapsNet Model
+
+# CapsNet Model
 def CapsNet(input_shape, n_class, routings, batch_size):
     x = layers.Input(shape=input_shape, batch_size=batch_size)
     conv1 = layers.Conv2D(filters=256, kernel_size=9, strides=1, padding='valid', activation='relu', name='conv1')(x)
@@ -44,25 +59,26 @@ def CapsNet(input_shape, n_class, routings, batch_size):
     digitcaps = CapsuleLayer(num_capsule=n_class, dim_capsule=16, routings=routings, name='digitcaps')(primarycaps)
     out_caps = Length(name='capsnet')(digitcaps)
     y = layers.Input(shape=(n_class,))
-    masked_by_y = Mask()([digitcaps, y]) 
-    masked = Mask()(digitcaps)  
-    
+    masked_by_y = Mask()([digitcaps, y])
+    masked = Mask()(digitcaps)
+
     decoder = models.Sequential(name='decoder')
     decoder.add(layers.Dense(512, activation='relu', input_dim=16 * n_class))
     decoder.add(layers.Dense(1024, activation='relu'))
     decoder.add(layers.Dense(np.prod(input_shape), activation='sigmoid'))
     decoder.add(layers.Reshape(target_shape=input_shape, name='out_recon'))
-    
+
     train_model = models.Model([x, y], [out_caps, decoder(masked_by_y)])
     eval_model = models.Model(x, [out_caps, decoder(masked)])
-    
+
     noise = layers.Input(shape=(n_class, 16))
     noised_digitcaps = layers.Add()([digitcaps, noise])
     masked_noised_y = Mask()([noised_digitcaps, y])
     manipulate_model = models.Model([x, y, noise], decoder(masked_noised_y))
     return train_model, eval_model, manipulate_model
 
-#loss Function
+
+# loss Function
 def margin_loss(y_true, y_pred):
     L = y_true * tf.square(tf.maximum(0., 0.9 - y_pred)) + \
         0.5 * (1 - y_true) * tf.square(tf.maximum(0., y_pred - 0.1))
@@ -98,15 +114,19 @@ def performance_metrics(cnf_matrix, class_names):
     FNR = FN / (TP + FN)
     # False discovery rate
     FDR = FP / (TP + FP)
+    # F1-Score accuracy for each class
+    FScore = 2 * (PPV * TPR) / (PPV + TPR)
     # Overall accuracy for each class
-    ACC = 2 * (PPV * TPR) / (PPV + TPR)
-    print('\n\nClassName\tTP\tFP\tFN\tTN\tPrecision\tSensitivity\tSpecificity\tAccuracy')
+    ACC = (TP + TN) / (TP + FP + TN + FN)
+    print('\n\nClassName\tTP\tFP\tFN\tTN\tPrecision\tSensitivity\tSpecificity\tF-Score\t\tAccuracy')
     for i in range(len(class_names)):
-        print(class_names[i] + "\t\t{0:.0f}".format(TP[i]) + "\t{0:.0f}".format(FP[i]) + "\t{0:.0f}".format(FN[i]) + "\t{0:.0f}".format(TN[i]) + "\t{0:.4f}".format(PPV[i]) + "\t\t{0:.4f}".format(TPR[i]) + "\t\t{0:.4f}".format(TNR[i]) + "\t\t{0:.4f}".format(ACC[i]))
+        print(class_names[i] + "\t\t{0:.0f}".format(TP[i]) + "\t{0:.0f}".format(FP[i]) + "\t{0:.0f}".format(
+            FN[i]) + "\t{0:.0f}".format(TN[i]) + "\t{0:.4f}".format(PPV[i]) + "\t\t{0:.4f}".format(
+            TPR[i]) + "\t\t{0:.4f}".format(TNR[i]) + "\t\t{0:.4f}".format(FScore[i]) + "\t\t{0:.4f}".format(ACC[i]))
 
 
-#training part of Model
-def train(model, data,class_names, args):
+# training part of Model
+def train(model, data, class_names, args):
     # unpacking the data
     (x_train, y_train), (x_test, y_test) = data
 
@@ -120,36 +140,34 @@ def train(model, data,class_names, args):
     model.compile(optimizer=optimizers.Adam(lr=args.lr),
                   loss=[margin_loss, 'mse'],
                   loss_weights=[1., args.lam_recon],
-                  metrics={'capsnet': 'accuracy'})    
+                  metrics={'capsnet': 'accuracy'})
 
     # Begin: Training with data augmentation ---------------------------------------------------------------------#
     def train_generator(x, y, batch_size, shift_fraction=0.):
         train_datagen = ImageDataGenerator(width_shift_range=shift_fraction,
                                            height_shift_range=shift_fraction)  # shift up to 2 pixel for MNIST
-        generator = train_datagen.flow(x, y, batch_size=batch_size)#800 total batch size
+        generator = train_datagen.flow(x, y, batch_size=batch_size)  #
         while 1:
             x_batch, y_batch = generator.next()
             yield (x_batch, y_batch), (y_batch, x_batch)
 
-    # Training with data augmentation. If shift_fraction=0., no augmentation.
+
     model.fit(train_generator(x_train, y_train, args.batch_size, args.shift_fraction),
               steps_per_epoch=int(y_train.shape[0] / args.batch_size),
               epochs=args.epochs,
-              validation_data=((x_test, y_test), (y_test, x_test)), batch_size=args.batch_size,
+              validation_data=((x_val, y_val), (y_val, x_val)), batch_size=args.batch_size,
               callbacks=[log, checkpoint, lr_decay])
-    # End: Training with data augmentation -----------------------------------------------------------------------#
+
 
     model.save_weights(args.save_dir + '/trained_model.h5')
     print('Trained model saved to \'%s/trained_model.h5\'' % args.save_dir)
-    
+
     y_pred, x_recon = model.predict((x_test, y_test), batch_size=100)
-   
-   
-    
-    #Confusion matrix
-    cm=confusion_matrix(np.argmax(y_test, 1),np.argmax(y_pred, 1))   
-    #Overall Performance 
-    performance_metrics(cm,class_names)    
+
+    # Confusion matrix
+    cm = confusion_matrix(np.argmax(y_test, 1), np.argmax(y_pred, 1))
+    # Overall Performance
+    performance_metrics(cm, class_names)
     plotLog(args.save_dir + '/log.csv', showPlot=True)
     print('Test acc:', np.sum(np.argmax(y_pred, 1) == np.argmax(y_test, 1)) / y_test.shape[0])
     return model
@@ -196,7 +214,7 @@ def manipulate_latent(model, data, args):
     print('-' * 30 + 'End: manipulate' + '-' * 30)
 
 
-# Cost-Sensitive Learning for Imbalanced Classification
+# SMOTE Learning for Imbalanced Classification
 def OverSample(imgArr, labelArr):
     strategy = {0: 5000, 1: 20000, 2: 5000, 3: 12000, 4: 28000, 5: 6000, 6: 5000, 7: 5000, 8: 5000, 9: 5000, 10: 27000,
                 11: 5000, 12: 5000, 13: 8000, 14: 10000, 15: 30000, 16: 5000, 17: 5000, 18: 5000, 19: 8000, 20: 12000}
@@ -237,7 +255,7 @@ def loadDataset():
                     imgLoad = Image.open(filename)
                     resImg = imgLoad.resize((image_size, image_size), Image.BICUBIC)
                     numImg = (np.array(resImg)).astype('float64')
-                    normImg = NormalizeData(numImg) * (i / len(dirList))
+                    normImg = NormalizeData(numImg) * ((i + 1) / len(dirList))
                     imgArr.append(normImg)
                     image_label.append(i)
                     class_names.append(dirList[i])
@@ -254,66 +272,60 @@ def loadDataset():
     labelArr = np.array(labelArr).astype('float32')
 
     # Fix stratified sampling split
-    x_train, x_test, y_train, y_test = train_test_split(imgArr, labelArr, test_size=test_ratio, random_state=2,
+    x_train, x_temp, y_train, y_temp = train_test_split(imgArr, labelArr, test_size=test_ratio, random_state=2,
                                                         stratify=labelArr)
+    x_test, x_val, y_test, y_val = train_test_split(x_temp, y_temp, test_size=val_ratio, random_state=2,
+                                                    stratify=y_temp)
+
     print('Read complete')
     print(len(x_train))
     print(len(x_test))
-    return (x_train, y_train), (x_test, y_test), classNames
+    print(len(x_val))
+    return (x_train, y_train), (x_test, y_test), (x_val, y_val), classNames
 
-#arguments for Caps Net Parameters
+
+# arguments for Caps Net Parameters
 if __name__ == "__main__":
-    import os
-    import argparse
-    from tensorflow.keras.preprocessing.image import ImageDataGenerator
-    from tensorflow.keras import callbacks
-
-    # setting the hyper parameters
-    parser = argparse.ArgumentParser(description="Capsule Network on Dataset.")
-    parser.add_argument('--epochs', default=100, type=int)
-    parser.add_argument('--batch_size', default=100, type=int)
-    parser.add_argument('--lr', default=0.001, type=float,
-                        help="Initial learning rate")
-    parser.add_argument('--lr_decay', default=0.9, type=float,
-                        help="The value multiplied by lr at each epoch. Set a larger value for larger epochs")
-    parser.add_argument('--lam_recon', default=0.392, type=float,
-                        help="The coefficient for the loss of decoder")
-    parser.add_argument('-r', '--routings', default=3, type=int,
-                        help="Number of iterations used in routing algorithm. should > 0")
-    parser.add_argument('--shift_fraction', default=0.1, type=float,
-                        help="Fraction of pixels to shift at most in each direction.")
-    parser.add_argument('--debug', action='store_true',
-                        help="Save weights by TensorBoard")
-    parser.add_argument('--save_dir', default='./result')
-    parser.add_argument('-t', '--testing', action='store_true',
-                        help="Test the trained model on testing dataset")
-    parser.add_argument('--digit', default=5, type=int,
-                        help="Digit to manipulate")
-    parser.add_argument('-w', '--weights', default=None,
-                        help="The path of the saved weights. Should be specified when testing")
-    args = parser.parse_args()
-    print(args)
+    args = argparse.Namespace(
+        epochs=50,
+        batch_size=100,
+        lr=0.001,
+        lr_decay=0.9,
+        lam_recon=0.392,
+        routings=3,
+        shift_fraction=0.1,
+        debug=False,
+        save_dir='./result',
+        testing=False,
+        digit=5,
+        weights=None
+    )
 
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    # load data
-    (x_train, y_train), (x_test, y_test), classNames = loadDataset()
+    # Load data
+    (x_train, y_train), (x_test, y_test), (x_val, y_val), classNames = loadDataset()
 
-    # define model
+    # Define model
     model, eval_model, manipulate_model = CapsNet(input_shape=x_train.shape[1:],
                                                   n_class=len(np.unique(np.argmax(y_train, 1))),
                                                   routings=args.routings,
                                                   batch_size=args.batch_size)
     model.summary()
 
-    # train or test
-    if args.weights is not None:  # init the model weights with provided one
+    # Train or test
+    if args.weights is not None:
         model.load_weights(args.weights)
     if not args.testing:
-        train(model=model, data=((x_train, y_train), (x_test, y_test)),class_names=classNames, args=args)
-    else:  # as long as weights are given, will run testing
+        train(model=model, data=((x_train, y_train), (x_test, y_test)), class_names=classNames, args=args)
+    else:
         if args.weights is None:
-            print('No weights are provided. Will test using random initialized weights.')
+            print('No weights are provided. Will test using randomly initialized weights.')
         manipulate_latent(manipulate_model, (x_test, y_test), args)
         test(model=eval_model, data=(x_test, y_test), args=args)
+
+end_time = time.time()
+execution_time = end_time - start_time
+
+print(f"Execution time: {execution_time} seconds")
