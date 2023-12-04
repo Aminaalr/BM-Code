@@ -38,7 +38,7 @@ fix_gpu()
 pathImg = 'images'
 
 # Image Size
-image_size = 32
+image_size = 75
 
 # Split Ratio 70% for train , 255 for test , 5% for validation
 test_ratio = 0.25
