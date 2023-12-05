@@ -40,10 +40,6 @@ pathImg = 'images'
 # Image Size
 image_size = 75
 
-# Split Ratio 70% for train , 255 for test , 5% for validation
-test_ratio = 0.25
-val_ratio = 0.05
-
 
 # Cost-Sensitive Learning for Imbalanced Classification
 def OverSample(imgArr, labelArr):
@@ -102,11 +98,10 @@ def loadDataset():
     imgArr, labelArr = OverSample(imgArr, labelArr)
     labelArr = np.array(labelArr).astype('float32')
 
-    # Fix stratified sampling split
-    x_train, x_temp, y_train, y_temp = train_test_split(imgArr, labelArr, test_size=test_ratio, random_state=2,
+    # Split the data into training, validation, and test sets
+    x_train, x_temp, y_train, y_temp = train_test_split(imgArr, labelArr, test_size=0.3, random_state=2,
                                                         stratify=labelArr)
-    x_test, x_val, y_test, y_val = train_test_split(x_temp, y_temp, test_size=val_ratio, random_state=2,
-                                                    stratify=y_temp)
+    x_val, x_test, y_val, y_test = train_test_split(x_temp, y_temp, test_size=2 / 3, random_state=2, stratify=y_temp)
 
     print('Read complete')
     print(len(x_train))
